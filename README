@@ -1,0 +1,33 @@
+
+				orange v1.11
+
+This is a script for sending messages to Orange phones (available in the UK).
+It works by POSTing the message to a form on the Orange web site.
+Before using the script you must register to get a username and password.
+
+To install this script, you should just have to run the following:
+
+	% perl Makefile.PL
+	% make install
+
+The script is fully documented using pod. Once installed you should get
+a man page. It also supports two informational switches:
+
+	-help	display a short help message
+	-doc	format the pod documentation to the tty
+
+The script requires the libwww-perl5 distribution; you can get the
+latest version from CPAN at:
+
+	http://www.perl.com/CPAN/modules/by-module/LWP/
+
+It also uses Andy Wardley's App::Config module, and
+Brad Appleton's Pod::Usage. Both modules are available from CPAN.
+
+I'd be happy to hear of any suggestions for improving this script.
+
+Neil Bowers <neilb@cre.canon.co.uk>
+Canon Research Centre Europe
+http://www.cre.canon.co.uk/
+--
+RCS ID: $Id: README,v 1.11 1998/07/24 09:27:12 neilb Exp $

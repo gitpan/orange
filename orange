@@ -1,0 +1,504 @@
+#!/apps/perl5/bin/perl -w
+
+=head1 NAME
+
+orange - send a text message to an orange phone
+
+=head1 SYNOPSIS
+
+orange -user <user> -password <pword> -message "hello Mum!" -number NNN
+
+orange [ -debug ] -to <alias> -message "hello, Mum!"
+
+orange [ -help | -doc ]
+
+=head1 DESCRIPTION
+
+B<orange> can be used to send a short text message to an Orange cell phone.
+The script works by posting the message to a form on the Orange web site.
+Before using the script, you must register with Orange to get a username
+and password.
+
+At the time of writing, the registration URL is:
+
+    http://www.orange.co.uk/orange/cgi-bin/new/register.pl
+
+The script tries to parse the response from the server, to look for
+a message which says how many messages you have sent.
+The Orange server restricts you to 20 messages in any 30 day period.
+
+=head1 OPTIONS
+
+=over 4
+
+=item -user <string>
+
+Your username which was registered via the Orange web site.
+
+=item -password <string>
+
+The password for your Orange username.
+
+=item -message <string>
+
+The text message to send. This should not be longer than 100 characters.
+
+=item -number <string>
+
+The Orange phone number to send the message to.
+
+=item -to <alias>
+
+Specifies the recipient of the message using an alias,
+which must be defined in your configuration file.
+See L<CONFIGURATION FILE> below.
+
+=item -proxy <URL>
+
+Specify a proxy to use when making the HTTP request to the
+Orange web site. If you use a proxy, you probably want to
+put it in your config file - see below.
+
+=item -email <email>
+
+Your email address, to include the HTTP request header.
+As with the proxy, you might want to put this in your configuration file.
+
+=item -help
+
+Displays a short help message
+
+=item -doc
+
+Display the full documentation for B<orange>.
+
+=item -debug
+
+Turns on debugging information. Useful mainly for the developer.
+
+=item -version
+
+Display the version number of the B<orange> script.
+
+=back
+
+=cut
+
+use strict;
+
+use HTTP::Request::Common qw(POST);
+use HTTP::Response;
+use HTTP::Status;
+use LWP::UserAgent;
+use App::Config;
+use Pod::Usage;
+
+
+my $VERSION;
+( $VERSION ) = '$Revision: 1.11 $' =~ /\$Revision:\s+(\S+)/;
+my $PROGRAM    = 'orange';
+my $ORANGE     = 'http://www.orange.co.uk/orange/cgi-bin/register/sms.pl';
+my @CODES      = ('0973', '0976', '0966', '07970', '0941');
+my $config;
+my $code;
+my $number;
+my %alias      = ();
+
+
+initialise();
+check_switches();
+send_message();
+exit 0;
+
+#=======================================================================
+#
+# send_message()
+#
+# post the message to the CGI on the Orange web site.
+#
+#=======================================================================
+sub send_message
+{
+    my $agent;
+    my $request;
+    my $response;
+
+
+    #-------------------------------------------------------------------
+    # Create the User Agent which we'll use to actually make the request
+    #-------------------------------------------------------------------
+    $agent = create_agent();
+
+
+    #-------------------------------------------------------------------
+    # Create a POST request. POST is a convenience function from
+    # HTTP::Request::Common.
+    #-------------------------------------------------------------------
+    $request = POST($ORANGE, {
+                             messagetype => $code,
+                             number      => $number,
+                             message     => $config->message,
+                         });
+    $request->authorization_basic($config->user, $config->password);
+
+
+    #-------------------------------------------------------------------
+    # If in debug mode, then dump out the HTTP request before we send
+    # it off.
+    #-------------------------------------------------------------------
+    if ($config->debug)
+    {
+        print '#' x 76, "\n";
+        print $request->as_string();
+        print '#' x 76, "\n";
+    }
+
+    #-------------------------------------------------------------------
+    # POST the request
+    #-------------------------------------------------------------------
+    $response = $agent->request($request);
+
+    #-------------------------------------------------------------------
+    # Tell the user how it went.
+    #-------------------------------------------------------------------
+    if (not defined $response)
+    {
+        die "Request completely failed - we got undef back: $!\n";
+    }
+    if ($response->is_error)
+    {
+        if ($response->code == RC_NOT_FOUND)
+        {
+            die "Orange's CGI for handling messages seems to have moved!\n",
+            "(HTTP response code of 404 from the Orange web server)\n",
+            "It used to be:\n\n\t$ORANGE\n\n",
+            "Please check the Orange site, and then inform the ",
+            "maintainer of this script\n";
+        }
+        else
+        {
+            die "request failed\n  Error code: ", $response->code,
+                "\n  Message: ",
+            $response->message, "\n";
+        }
+    }
+    else
+    {
+        if ($config->debug)
+        {
+            print "\nLooks OK!\n";
+            print '#' x 76, "\n";
+            print $response->as_string();
+            print '#' x 76, "\n";
+        }
+        else
+        {
+            print "message sent ok [", $response->code, "]\n";
+            if ($response->content =~ /(you have sent \d+ messages[^\.]+)/)
+            {
+                my $summary = $1;
+                $summary =~ s/\s*\n\s*/ /g;
+                print $summary, "\n";
+            }
+        }
+    }
+}
+    
+#=======================================================================
+#
+# initialise()
+#
+# Create instance of App::Config, and use it to parse a config file
+# if the user has one, and then parse the command-line.
+#
+#=======================================================================
+sub initialise
+{
+    my $config_file;
+    my $HOME;
+
+
+    #-------------------------------------------------------------------
+    # Check whether the user has a config file in their home directory
+    #-------------------------------------------------------------------
+    $HOME = $ENV{'HOME'} || (getpwuid($<))[7];
+    $config_file = "$HOME/.orangerc";
+    if (-e $config_file && ((stat($config_file))[2] & 36) != 0)
+    {
+        die "$PROGRAM: your config file $config_file is readable by others!\n";
+    }
+
+    #-------------------------------------------------------------------
+    # Create instance of App::Config:
+    #     Use GLOBAL to specify that by default we expect a parameter,
+    #     and for variable foo we want -foo.
+    #     We have our own line parser to handle the "alias" command.
+    #-------------------------------------------------------------------
+    $config = App::Config->new({
+                               GLOBAL => { CMDARG   => 1,
+                                           ARGCOUNT => 1
+                                         },
+                               LINEPARSE => \&my_line_parser,
+                              });
+
+    #-------------------------------------------------------------------
+    # Define configuration variables. All of these can appear in
+    # your .orangerc as well. Doesn't really make sense for "doc",
+    # "help" or "version" to be in there though.
+    #-------------------------------------------------------------------
+    $config->define('user');
+    $config->define('password');
+    $config->define('message');
+    $config->define('number');
+    $config->define('to');
+    $config->define('proxy');
+    $config->define('email');
+    $config->define('debug',   { ARGCOUNT => 0 });
+    $config->define('doc',     { ARGCOUNT => 0 });
+    $config->define('help',    { ARGCOUNT => 0 });
+    $config->define('version', { ARGCOUNT => 0 });
+
+    #-------------------------------------------------------------------
+    # Read the user's config file, if they have one,
+    # then parse the command-line.
+    #-------------------------------------------------------------------
+    if (-f $config_file)
+    {
+        $config->cfg_file($config_file) || exit 1;
+    }
+    $config->cmd_line(\@ARGV) || exit 1;
+
+    pod2usage(verbose => 2, exitval => 0) if $config->doc();
+    pod2usage(verbose => 1, exitval => 0) if $config->help();
+    show_version()                        if $config->version();
+}
+
+#=======================================================================
+#
+# check_switches()
+#
+# Check that all of the information required to send a message
+# was provided by the user.
+#
+#=======================================================================
+sub check_switches
+{
+    my $toalias;
+
+
+    if (defined ($toalias = $config->to))
+    {
+        if (exists $alias{$toalias})
+        {
+            $number = $alias{$toalias};
+        }
+        else
+        {
+            die "unknown alias \"$toalias\" - please see your config file!\n";
+        }
+    }
+    elsif (defined $config->number)
+    {
+        $number = $config->number;
+    }
+    else
+    {
+        die "no recipient specified - use -number or -to\n";
+    }
+
+    if (not defined $config->user)
+    {
+        die "You must provide a username, with the -user switch\n";
+    }
+    if (not defined $config->password)
+    {
+        die "You must provide a password, with the -password switch\n";
+    }
+    if (not defined $config->message)
+    {
+        die "You didn't give me a message to send!\n";
+    }
+
+    foreach my $c (@CODES)
+    {
+        if ($number =~ /^$c/)
+        {
+            $code = $c;
+            $number = $';
+            return;
+        }
+    }
+    die "unknown orange prefix - should be one of ", join(', ', @CODES), "\n";
+}
+
+#=======================================================================
+#
+# create_agent()
+#
+# Create the UserAgent object which will make the HTTP request for us
+#
+#=======================================================================
+sub create_agent
+{
+    my $agent;
+
+
+    $agent = eval { new LWP::UserAgent };
+    die "Failed to create UserAgent: $@\n" if ($@ || (not defined $agent));
+
+    $agent->agent("OrangeTalker/$VERSION");
+    $agent->from($config->email) if defined $config->email;
+    $agent->proxy(['http'], $config->proxy) if defined $config->proxy;
+
+    return $agent;
+}
+
+#=======================================================================
+#
+# show_version()
+#
+# Display the version number of the orange script.
+#
+#=======================================================================
+sub show_version
+{
+    print "$VERSION\n";
+    exit 0;
+}
+
+=head1 CONFIGURATION FILE
+
+You can provide additional information, including aliases,
+via a .orangerc file in your home directory.
+There are only three directives you can use in the config file:
+
+=over 4
+
+=item user <username>
+
+This is used to specify your Orange username.
+This just saves you from typing it every time you run the script.
+
+=item password <password>
+
+This is used to specify your Orange password.
+
+=item alias <name> <number>
+
+This directive is used to associate a name with a number.
+For example:
+
+    alias andy 07970111111
+
+Having defined an alias in your .orangerc, you can use
+the B<-to> switch in place of the B<-number> switch.
+
+Note that aliases are case-sensitive.
+
+=item proxy <URL>
+
+Used to specify a proxy which should be used when making HTTP requests.
+For example:
+
+    proxy http://proxyhost:8080/
+
+=item email <EMAIL>
+
+Specifies an optional email address which is passed in the header of
+the HTTP request. It is considered Good Form to provide this :-)
+
+=back
+
+The following is a sample .orangrc file:
+
+    # example .orangrc for user neilb
+    # the user is your registered Orange username
+    user neilb
+    password xyzzy
+    
+    alias andy 0797011111
+    alias bob 096612345
+
+Note that your .orangrc must not be readable by others,
+since it can contain your Orange password. The b<orange> script
+refuses to run if your config file can be read by others.
+
+=cut
+
+#=======================================================================
+#
+# my_line_parser()
+#
+# We provide our own line parser for App::Config, to deal with the
+# alias command, which takes two arguments. The alias command can
+# also appear multiple times in the config file, which isn't handled
+# by App::Config. Yet :-)
+#
+#=======================================================================
+sub my_line_parser
+{
+    my $config   = shift;
+    my $filename = shift;
+    my $lineno   = shift;
+    my $line     = shift;
+
+
+    #-------------------------------------------------------------------
+    # The format of the alias line is:
+    #       alias fred 01486358
+    # where the name cannot include whitespace, and can't be quoted.
+    # the number must contain only digits, and can't be quoted.
+    #-------------------------------------------------------------------
+    return 0 unless $line =~ /^\s*alias\s+(\S+)\s+(\d+)/io;
+
+    $alias{$1} = ''.$2;
+
+    return 1;
+}
+
+=head1 SEE ALSO
+
+=over 4
+
+=item http://www.orange.co.uk/
+
+The Orange web site.
+
+=item libwww-perl5
+
+The LWP distribution which provides the modules used by this script
+to talk to the Orange web site. Available from CPAN:
+
+    http://www.perl.com/CPAN/modules/by-module/LWP/
+
+=item App::Config
+
+Andy Wardley's module for unifying command-line switches and
+cofiguration files into the notion of configuration variables.
+B<orange> requires version 1.07 of the module,
+which is available from CPAN:
+
+    http://www.perl.com/CPAN/modules/by-module/App/
+
+=item Pod::Usage
+
+Brad Appleton's module for extracting usage information out
+of a file's pod. This is used for the B<-doc> and B<-help> switches.
+Available from CPAN:
+
+    http://www.perl.com/CPAN/modules/by-module/Pod/
+
+=back
+
+=head1 AUTHOR
+
+Neil Bowers E<lt>neilb@cre.canon.co.ukE<gt>
+
+=head1 COPYRIGHT
+
+Copyright (c) 1997,1998 Canon Research Centre Europe. All rights reserved.
+
+This script is free software; you can redistribute it and/or modify
+it under the same terms as Perl itself.
+
+=cut
